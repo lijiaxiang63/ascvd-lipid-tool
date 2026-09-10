@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            platform: windows-latest
+            args: '--bundles nsis'
+          - name: macOS Apple Silicon
+            platform: macos-latest
+            args: '--target aarch64-apple-darwin --bundles app,dmg'
+          - name: macOS Intel
+            platform: macos-latest
+            args: '--target x86_64-apple-darwin --bundles app,dmg'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run guideline logic tests
+        run: npm run test:logic
+
+      - name: Build & publish GitHub Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: '血脂目标计算器 v__VERSION__'
+          releaseBody: |
+            ## 个体化血脂控制目标计算器 v__VERSION__
+
+            依据《中国血脂管理指南（2023年）》危险分层，自动给出 LDL-C / 非 HDL-C 个体化控制目标值。
+
+            ### 下载
+
+            | 平台 | 文件 |
+            | --- | --- |
+            | Windows 10/11 (x64) | `*_x64-setup.exe`（NSIS 安装包，当前用户安装，免管理员） |
+            | macOS Apple Silicon | `*_aarch64.dmg` |
+            | macOS Intel | `*_x64.dmg` |
+
+            ### 使用说明
+
+            - 本版本未进行代码签名：
+              - Windows 首次运行如提示 SmartScreen，请点击「更多信息 → 仍要运行」；
+              - macOS 请右键点击应用选择「打开」，或在「系统设置 → 隐私与安全性」中允许。若提示“已损坏”，可在终端执行
+                `xattr -cr "/Applications/血脂目标计算器.app"` 后重试。
+            - Windows 10 如无法启动，请安装 [WebView2 运行时](https://go.microsoft.com/fwlink/p/?LinkId=2124703)。
+
+            ### 免责声明
+
+            本工具仅供临床参考与学习使用，不作为诊疗依据；具体治疗决策请结合患者个体情况并由专业医师判断。
+
+            依据：《中国血脂管理指南（2023年）》，中华心血管病杂志，2023，51(3)：221-255。
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
