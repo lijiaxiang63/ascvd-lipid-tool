@@ -290,4 +290,5 @@ for (const c of cases) {
   }
 }
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
-process.exit(fail ? 1 : 0);
+// 使用 exitCode 让进程自然退出，避免 Windows 上 process.exit() 触发的 libuv 断言崩溃
+process.exitCode = fail ? 1 : 0;
