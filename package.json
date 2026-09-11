@@ -1,7 +1,7 @@
 {
   "name": "ascvd-lipid-tool",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "个体化血脂控制目标计算器（基于《中国血脂管理指南（2023年）》）",
   "author": "zeyy",
   "type": "module",

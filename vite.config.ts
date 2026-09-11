@@ -1,12 +1,20 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 const host = process.env.TAURI_DEV_HOST;
 
+const pkg = JSON.parse(readFileSync("package.json", "utf-8")) as { version: string };
+
 // https://vite.dev/config/
 export default defineConfig(() => ({
   plugins: [react()],
+
+  // 将 package.json 版本号注入前端（关于界面展示）
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
