@@ -1,5 +1,6 @@
 // 逻辑自检：覆盖指南各危险分层与目标值场景
-import { assess, type PatientState } from '../src/lib/guideline.ts';
+import assert from 'node:assert/strict';
+import { assess, cholesterolColumn, lookupTenYearRisk, nonHdlValue, type PatientState } from '../src/lib/guideline.ts';
 
 const base: PatientState = {
   age: '',
@@ -142,7 +143,7 @@ const cases = [
       severe: { recentACS: true, priorMI: false, ischemicStroke: false, symptomaticPAD: false },
       lipids: { ldlc: '3.5', tc: '5.6', hdlc: '1.1' },
     },
-    expect: { cat: 'ultraHigh', ldl: 1.4, reduction50: false }, // 糖尿病合并ASCVD → 表15 1.4
+    expect: { cat: 'ultraHigh', ldl: 1.4, reduction50: true }, // 表15绝对目标 + 表7降幅要求
   },
   {
     name: '极高危+糖尿病：ASCVD 1次事件 0 因素 + 糖尿病 → 表15 目标 1.4',
@@ -180,7 +181,7 @@ const cases = [
     expect: { ldl: 1.8 },
   },
   {
-    name: '余生风险：50岁男性，高血压+2危险因素(吸烟+低HDL)，LDL-C 3.0 → 中危→余生高危(≥2项)',
+    name: '查表高危：50岁男性，高血压+3危险因素(年龄、吸烟、低HDL)，LDL-C 3.0',
     patch: {
       age: '50',
       sex: 'male',
@@ -292,3 +293,73 @@ for (const c of cases) {
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 // 使用 exitCode 让进程自然退出，避免 Windows 上 process.exit() 触发的 libuv 断言崩溃
 process.exitCode = fail ? 1 : 0;
+
+// 独立核对图1全部21格（无高血压的0~1个因素为同一行）。
+let boundaryChecks = 0;
+const matrix = [
+  [false, 0, ['low', 'low', 'low']],
+  [false, 2, ['low', 'low', 'moderate']],
+  [false, 3, ['low', 'moderate', 'moderate']],
+  [true, 0, ['low', 'low', 'low']],
+  [true, 1, ['low', 'moderate', 'moderate']],
+  [true, 2, ['moderate', 'high', 'high']],
+  [true, 3, ['high', 'high', 'high']],
+] as const;
+for (const [ht, rf, row] of matrix) {
+  for (const col of [0, 1, 2] as const) {
+    assert.equal(lookupTenYearRisk(ht, rf, col), row[col]);
+    boundaryChecks++;
+  }
+}
+for (const [ldl, expected] of [[1.79, null], [1.8, 0], [2.59, 0], [2.6, 1], [3.39, 1], [3.4, 2], [4.89, 2], [4.9, null]] as const) {
+  assert.equal(cholesterolColumn(ldl, null), expected);
+  boundaryChecks++;
+}
+for (const [tc, expected] of [[3.09, null], [3.1, 0], [4.09, 0], [4.1, 1], [5.19, 1], [5.2, 2], [7.19, 2], [7.2, null]] as const) {
+  assert.equal(cholesterolColumn(null, tc), expected);
+  boundaryChecks++;
+}
+const adult: PatientState = { ...base, age: '40', sex: 'male', lipids: { ldlc: '3', tc: '4.5', hdlc: '1.2' } };
+function check(name: string, patch: Partial<PatientState>, category: string | null, ldl?: number) {
+  const result = assess({ ...adult, ...patch });
+  assert.equal(result.category, category, name);
+  if (category === null) {
+    assert.equal(result.target, null, name);
+    assert.equal(result.nonHdl, null, name);
+    assert.ok(result.missing.length, name);
+  }
+  if (ldl !== undefined) assert.equal(result.target?.ldl, ldl, name);
+  boundaryChecks++;
+  return result;
+}
+check('缺年龄不输出确定分层', { age: '' }, null);
+check('缺性别不输出确定分层', { sex: '' }, null);
+for (const age of ['-1', '17', '120.5', '121', 'abc']) check('拒绝无效或未成年年龄', { age }, null);
+for (const ldlc of ['-1', '0', '1..2', 'NaN']) check('拒绝无效血脂', { lipids: { ...adult.lipids, ldlc } }, null);
+check('TC不能低于HDL', { lipids: { ldlc: '', tc: '1', hdlc: '1.2' } }, null);
+check('LDL不能高于TC', { lipids: { ldlc: '5', tc: '4', hdlc: '1.2' } }, null);
+check('低于图表不外推', { lipids: { ldlc: '1.7', tc: '', hdlc: '1.2' } }, null);
+check('独立直接高危不依赖性别', { sex: '', ckd34: true }, 'high', 2.6);
+check('同类卒中复发', { ascvd: true, severe: { ...base.severe, ischemicStroke: true }, recurrentSevereEvents: true }, 'ultraHigh', 1.4);
+check('单次事件一项高危因素', { ascvd: true, severe: { ...base.severe, priorMI: true }, smoking: true }, 'veryHigh', 1.8);
+check('单次事件两项高危因素', { ascvd: true, severe: { ...base.severe, priorMI: true }, smoking: true, hypertension: true }, 'ultraHigh', 1.4);
+check('FH与高LDL只算一项因素', { ascvd: true, fh: true, fhAscvd: 'clinical', severe: { ...base.severe, priorMI: true }, lipids: { ldlc: '5', tc: '7', hdlc: '1.2' } }, 'veryHigh', 1.4);
+const fh = check('FH临床ASCVD进入二级预防', { fh: true, fhAscvd: 'clinical' }, 'veryHigh', 1.4);
+assert.equal(fh.target?.recClass, 'IIa');
+assert.equal(fh.target?.evidence, 'B');
+assert.equal(fh.target?.reduction50, true);
+check('FH缺状态', { fh: true }, null);
+const life = { hypertension: true, smoking: true, lifetime: { ...base.lifetime, nonHdlHigh: true } };
+check('实测非HDL覆盖旧勾选', life, 'moderate', 2.6);
+check('55岁不使用余生风险升级', { ...life, age: '55', sex: 'female', smoking: false, lifetime: { bpHigh: true, nonHdlHigh: true, bmi28: true } }, 'moderate', 2.6);
+check('54岁中危且两项余生因素升级', { hypertension: true, age: '54', sex: 'female', smoking: true, lifetime: { ...base.lifetime, bmi28: true } }, 'high', 2.6);
+check('实测HDL覆盖旧低HDL勾选', { hypertension: true, lowHDLManual: true }, 'low', 3.4);
+check('女性55岁计入年龄因素', { hypertension: true, age: '55', sex: 'female' }, 'moderate', 2.6);
+check('男性45岁计入年龄因素', { hypertension: true, age: '45' }, 'moderate', 2.6);
+check('1型病程20年', { age: '30', diabetes: true, diabetesType: 't1', t1Duration20: true }, 'high', 1.8);
+check('青年糖尿病靶器官损害', { age: '30', diabetes: true, targetOrganDamage: true }, 'high', 1.8);
+check('青年糖尿病两项因素未直接高危', { age: '30', diabetes: true, hypertension: true, dmRiskFactors: { ...base.dmRiskFactors, obesity: true } }, 'low', 2.6);
+const dm = check('糖尿病合并ASCVD保留降幅', { ascvd: true, diabetes: true }, 'veryHigh', 1.4);
+assert.equal(dm.target?.reduction50, true);
+assert.equal(nonHdlValue({ ...adult, lipids: { ...adult.lipids, tc: '6.1', hdlc: '0.9' } }), 5.2);
+console.log(`边界与图1回归：${boundaryChecks} 项通过；附加目标与精度断言通过。`);

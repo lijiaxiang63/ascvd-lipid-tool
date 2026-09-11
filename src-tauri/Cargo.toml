@@ -1,6 +1,6 @@
 [package]
 name = "ascvd-lipid-tool"
-version = "0.1.1"
+version = "0.1.2"
 description = "Individualized lipid control target calculator based on the Chinese Guidelines for Lipid Management (2023)"
 authors = ["zeyy"]
 edition = "2021"

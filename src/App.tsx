@@ -38,12 +38,12 @@ const initialState: PatientState = {
   riskEnhancerUpgrade: false,
 };
 
-const RISK_STYLE: Record<string, { bg: string; fg: string; grad: string }> = {
-  low: { bg: '#e8f7ee', fg: '#15803d', grad: 'linear-gradient(135deg,#22c55e,#16a34a)' },
-  moderate: { bg: '#e8f1fe', fg: '#1d4ed8', grad: 'linear-gradient(135deg,#3b82f6,#2563eb)' },
-  high: { bg: '#fef3e2', fg: '#b45309', grad: 'linear-gradient(135deg,#f59e0b,#ea580c)' },
-  veryHigh: { bg: '#fdeaea', fg: '#b91c1c', grad: 'linear-gradient(135deg,#ef4444,#dc2626)' },
-  ultraHigh: { bg: '#f3e8ff', fg: '#7e22ce', grad: 'linear-gradient(135deg,#a855f7,#7c3aed)' },
+const RISK_STYLE: Record<string, { bg: string; fg: string }> = {
+  low: { bg: '#eef6f2', fg: '#327158' },
+  moderate: { bg: '#eff4f8', fg: '#466882' },
+  high: { bg: '#faf4e9', fg: '#936722' },
+  veryHigh: { bg: '#fbefec', fg: '#a34f40' },
+  ultraHigh: { bg: '#f7edf0', fg: '#934660' },
 };
 
 const STEP_META: Record<number, { title: string; short: string; hint: string }> = {
@@ -81,7 +81,12 @@ function buildCtx(s: PatientState): Ctx {
     (tc !== null && tc >= 7.2) ||
     (s.diabetes && age !== null && age >= 40) ||
     s.ckd34;
-  const tableRisk = !s.ascvd && !directHigh && col !== null ? lookupTenYearRisk(s.hypertension, rfCount, col) : null;
+  const assessed = assess(s);
+  const youngDiabetesHigh = s.diabetes && age !== null && age < 40 && (
+    (s.diabetesType === 't1' && s.t1Duration20) ||
+    (age >= 20 && (s.targetOrganDamage || [s.hypertension, s.smoking, ...Object.values(s.dmRiskFactors)].filter(Boolean).length >= 3))
+  );
+  const tableRisk = !s.ascvd && !directHigh && !youngDiabetesHigh && assessed.category !== null && col !== null ? lookupTenYearRisk(s.hypertension, rfCount, col) : null;
   return { age, ldlc, tc, hdlc, nonHdl: nonHdlValue(s), lowHDL, ageRisk, rfCount, col, tableRisk, directHigh };
 }
 
@@ -144,6 +149,7 @@ function Seg<T extends string>(props: {
           key={o.value}
           type="button"
           className={props.value === o.value ? 'on' : ''}
+          aria-pressed={props.value === o.value}
           onClick={() => props.onChange(o.value)}
         >
           {o.label}
@@ -158,7 +164,7 @@ function StepBasics({ s, set }: { s: PatientState; set: (p: Partial<PatientState
   return (
     <div className="step-stack">
       <div className="grid-2">
-        <NumField label="年龄" value={s.age} onChange={(v) => set({ age: v })} unit="岁" placeholder="如 58" />
+        <NumField label="年龄" value={s.age} onChange={(v) => set({ age: v })} unit="岁" placeholder="如 58" hint="适用于 18 岁及以上成人" />
         <div className="seg-field">
           <span className="field-label">性别</span>
           <Seg<Sex>
@@ -259,7 +265,7 @@ function StepBasics({ s, set }: { s: PatientState; set: (p: Partial<PatientState
                   { value: 'subclinical', label: '伴亚临床 ASCVD' },
                   { value: 'clinical', label: '伴临床 ASCVD' },
                 ]}
-                onChange={(v) => set({ fhAscvd: v })}
+                onChange={(v) => set({ fhAscvd: v, ascvd: v === 'clinical' })}
               />
             </div>
           </div>
@@ -318,7 +324,7 @@ function StepLipids({ s, set, ctx }: { s: PatientState; set: (p: Partial<Patient
         </div>
         <div className="info-item">
           <span>胆固醇分层（图1）</span>
-          <b>{ctx.col !== null ? `第 ${ctx.col + 1} 层` : ctx.ldlc !== null && ctx.ldlc >= 4.9 ? '直接高危' : '待填写'}</b>
+          <b>{(ctx.ldlc !== null && ctx.ldlc >= 4.9) || (ctx.tc !== null && ctx.tc >= 7.2) ? '直接高危' : ctx.col !== null ? `第 ${ctx.col + 1} 层` : '待评估'}</b>
           <small>{ctx.col !== null ? ['3.1≤TC<4.1 或 1.8≤LDL-C<2.6', '4.1≤TC<5.2 或 2.6≤LDL-C<3.4', '5.2≤TC<7.2 或 3.4≤LDL-C<4.9'][ctx.col] : ctx.tc !== null && ctx.tc >= 7.2 ? 'TC≥7.2，直接高危' : ''}</small>
         </div>
         <div className="info-item">
@@ -342,7 +348,7 @@ function StepRisk({ s, set, ctx }: { s: PatientState; set: (p: Partial<PatientSt
             { value: 'no', label: '否（一级预防）' },
             { value: 'yes', label: '是（二级预防）' },
           ]}
-          onChange={(v) => set({ ascvd: v === 'yes' })}
+          onChange={(v) => set({ ascvd: v === 'yes', ...(s.fh ? { fhAscvd: v === 'yes' ? 'clinical' : s.fhAscvd === 'clinical' ? '' : s.fhAscvd } : {}) })}
         />
       </div>
 
@@ -352,7 +358,7 @@ function StepRisk({ s, set, ctx }: { s: PatientState; set: (p: Partial<PatientSt
             <div className="sub-card-head">
               <b>严重 ASCVD 事件</b>
               <span className="count-chip">
-                已选 {[s.severe.recentACS, s.severe.priorMI, s.severe.ischemicStroke, s.severe.symptomaticPAD].filter(Boolean).length} 项 / ≥2 项即为超高危
+                按独立事件次数判断 · 同次事件不重复计数
               </span>
             </div>
             <div className="check-list">
@@ -363,6 +369,12 @@ function StepRisk({ s, set, ctx }: { s: PatientState; set: (p: Partial<PatientSt
                 checked={s.severe.symptomaticPAD}
                 onChange={(v) => set({ severe: { ...s.severe, symptomaticPAD: v } })}
                 label="有症状的周围血管病变（既往接受过血运重建或截肢）"
+              />
+              <CheckRow
+                checked={s.recurrentSevereEvents ?? false}
+                onChange={(v) => set({ recurrentSevereEvents: v })}
+                label="病史确认：累计 ≥2 次独立的严重 ASCVD 事件"
+                sub="包括同类事件复发，如两次缺血性脑卒中；同一次 ACS 与心肌梗死只计一次"
               />
             </div>
           </div>
@@ -389,7 +401,7 @@ function StepRisk({ s, set, ctx }: { s: PatientState; set: (p: Partial<PatientSt
               <CheckRow
                 checked={s.highRisk.ldlUnder18ReEvent}
                 onChange={(v) => set({ highRisk: { ...s.highRisk, ldlUnder18ReEvent: v } })}
-                label="LDL-C<1.8 mmol/L、再次发生严重的 ASCVD 事件"
+                label="LDL-C≤1.8 mmol/L、再次发生严重的 ASCVD 事件"
               />
               <CheckRow
                 checked={s.highRisk.prematureCHD}
@@ -451,7 +463,7 @@ function StepRisk({ s, set, ctx }: { s: PatientState; set: (p: Partial<PatientSt
                     10年风险：{ctx.tableRisk === 'low' ? '低危（<5%）' : ctx.tableRisk === 'moderate' ? '中危（5%~9%）' : '高危（≥10%）'}
                   </span>
                 ) : (
-                  <span className="count-chip">请在“基线血脂”填写 LDL-C 或 TC</span>
+                  <span className="count-chip">请查看右侧分层结果与待补充信息</span>
                 )}
               </div>
               <p className="hint">按血清胆固醇水平分层 + 有无高血压 + 其他危险因素（吸烟、低 HDL-C、年龄男≥45/女≥55岁）个数组合判定。</p>
@@ -463,7 +475,7 @@ function StepRisk({ s, set, ctx }: { s: PatientState; set: (p: Partial<PatientSt
             </div>
           )}
 
-          {ctx.tableRisk === 'moderate' ? (
+          {ctx.tableRisk === 'moderate' && ctx.age !== null && ctx.age < 55 ? (
             <div className="sub-card">
               <div className="sub-card-head">
                 <b>余生风险（10年风险中危且年龄 &lt;55 岁）</b>
@@ -641,10 +653,8 @@ export default function App() {
   if (result.target?.ldl != null && ctx.ldlc != null) {
     if (result.target.reduction50) {
       const half = ctx.ldlc / 2;
-      if (ctx.ldlc <= result.target.ldl) {
-        effective = null; // 基线已达标，无需强制降幅
-      } else if (half < result.target.ldl) {
-        effective = { value: Math.round(half * 100) / 100, fromBaseline: true };
+      if (half < result.target.ldl) {
+        effective = { value: half, fromBaseline: true };
       } else {
         effective = { value: result.target.ldl, fromBaseline: false };
       }
@@ -661,7 +671,7 @@ export default function App() {
       lines.push(`首要目标 LDL-C：${result.target.display}`);
       lines.push(`非 HDL-C 目标：<${fmt(result.target.ldl + 0.8)} mmol/L`);
       if (effective?.fromBaseline) {
-        lines.push(`结合基线 LDL-C ${ctx.ldlc} mmol/L，实际需 <${fmt(effective.value)} mmol/L（绝对目标与降幅>50%取更严格者）`);
+        lines.push(`结合基线 LDL-C ${ctx.ldlc} mmol/L，实际需 <${fmt(effective.value, 4)} mmol/L（绝对目标与降幅>50%取更严格者）`);
       }
     }
     if (result.reasons.length) {
@@ -691,8 +701,8 @@ export default function App() {
               <svg viewBox="0 0 48 48" width="34" height="34">
                 <defs>
                   <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
-                    <stop offset="0" stopColor="#0ea5e9" />
-                    <stop offset="1" stopColor="#0e7490" />
+                    <stop offset="0" stopColor="#387d75" />
+                    <stop offset="1" stopColor="#387d75" />
                   </linearGradient>
                 </defs>
                 <path
@@ -719,10 +729,10 @@ export default function App() {
             <button type="button" className="btn ghost" onClick={() => setAboutOpen(true)}>
               关于
             </button>
-            <button type="button" className="btn ghost" onClick={() => setS(initialState)}>
+            <button type="button" className="btn ghost" onClick={() => { setS(initialState); setStep(1); setResultTab('basis'); setCopied(false); }}>
               重置
             </button>
-            <button type="button" className="btn primary" onClick={copySummary}>
+            <button type="button" className="btn primary" onClick={copySummary} disabled={!result.target}>
               {copied ? '已复制 ✓' : '复制结果'}
             </button>
           </div>
@@ -733,7 +743,7 @@ export default function App() {
         <nav className="side-nav">
           <p className="nav-title">评估步骤</p>
           {[1, 2, 3].map((n) => (
-            <button key={n} type="button" className={`nav-item${step === n ? ' on' : ''}`} onClick={() => setStep(n)}>
+            <button key={n} type="button" aria-current={step === n ? 'step' : undefined} className={`nav-item${step === n ? ' on' : ''}`} onClick={() => setStep(n)}>
               <span className="nav-num">{n}</span>
               <span className="nav-label">{STEP_META[n].short}</span>
               {missingSteps.has(n) ? <span className="nav-dot" title="有信息待补充">!</span> : null}
@@ -773,7 +783,7 @@ export default function App() {
         </main>
 
         <aside className="result-pane">
-          <div className="risk-head" style={{ background: result.category ? style.grad : 'linear-gradient(135deg,#94a3b8,#64748b)' }}>
+          <div className="risk-head" style={{ background: result.category ? style.bg : '#f6f8f8', color: result.category ? style.fg : '#667572' }}>
             <span className="risk-caption">ASCVD 危险分层</span>
             <span className="risk-name">{result.category ? result.categoryLabel : '待评估'}</span>
             {result.chips.length ? (
@@ -812,7 +822,7 @@ export default function App() {
                   </div>
                   {effective?.fromBaseline ? (
                     <div className="target-effective">
-                      结合基线（{ctx.ldlc} mmol/L）：实际需 <b>&lt;{fmt(effective.value)} mmol/L</b>
+                      结合基线（{ctx.ldlc} mmol/L）：实际需 <b>&lt;{fmt(effective.value, 4)} mmol/L</b>
                       <span className="hint-inline">（绝对目标与降幅 &gt;50% 取更严格者）</span>
                     </div>
                   ) : null}
@@ -877,11 +887,13 @@ export default function App() {
               ) : null}
 
               {resultTab === 'advice' ? (
+                result.advice.length ? (
                 <ul className="advice-list">
                   {result.advice.map((a, i) => (
                     <li key={i}>{a}</li>
                   ))}
                 </ul>
+                ) : <p className="empty-hint">补全评估信息后展示对应建议。</p>
               ) : null}
 
               {resultTab === 'monitor' ? (

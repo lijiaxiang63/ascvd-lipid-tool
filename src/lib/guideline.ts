@@ -29,9 +29,9 @@ export interface SevereEventInput {
   symptomaticPAD: boolean;
 }
 
-/** 高危险因素（指南图1）：以下 4 项需手动勾选，糖尿病/高血压/CKD/吸烟由基本信息自动带入 */
+/** 高危险因素（指南图1）：以下 3 项手动勾选，其余由基本信息及血脂自动带入 */
 export interface HighRiskFactorInput {
-  /** ① LDL-C<1.8 mmol/L、再次发生严重的 ASCVD 事件 */
+  /** ① LDL-C≤1.8 mmol/L、再次发生严重的 ASCVD 事件 */
   ldlUnder18ReEvent: boolean;
   /** ② 早发冠心病（男<55岁、女<65岁） */
   prematureCHD: boolean;
@@ -70,6 +70,8 @@ export interface PatientState {
   // ---------- ASCVD 二级预防 ----------
   ascvd: boolean;
   severe: SevereEventInput;
+  /** 经病史确认至少两次独立的严重事件，包括同类事件复发；同一次 ACS/MI 不重复计数。 */
+  recurrentSevereEvents?: boolean;
   highRisk: HighRiskFactorInput;
 
   // ---------- 血脂水平（mmol/L） ----------
@@ -150,7 +152,8 @@ export function nonHdlValue(ldlState: PatientState): number | null {
   const tc = parseNum(ldlState.lipids.tc);
   const hdlc = parseNum(ldlState.lipids.hdlc);
   if (tc === null || hdlc === null) return null;
-  const v = tc - hdlc;
+  if (tc <= 0 || hdlc <= 0) return null;
+  const v = Math.round((tc - hdlc) * 1e10) / 1e10;
   return v > 0 ? v : null;
 }
 
@@ -188,19 +191,21 @@ export function cholesterolColumn(ldlc: number | null, tc: number | null): 0 | 1
     if (ldlc >= 3.4) return 2;
     if (ldlc >= 2.6) return 1;
     if (ldlc >= 1.8) return 0;
-    return 0;
+    return null; // 低于图1覆盖范围，不外推为第一列
   }
   if (tc !== null) {
     if (tc >= 7.2) return null;
     if (tc >= 5.2) return 2;
     if (tc >= 4.1) return 1;
     if (tc >= 3.1) return 0;
-    return 0;
+    return null;
   }
   return null;
 }
 
 export function assess(s: PatientState): Assessment {
+  // FH 的“伴临床 ASCVD”与二级预防是同一事实，避免两个入口产生矛盾。
+  s = { ...s, ascvd: s.ascvd || (s.fh && s.fhAscvd === 'clinical') };
   const age = parseNum(s.age);
   const ldlc = parseNum(s.lipids.ldlc);
   const tc = parseNum(s.lipids.tc);
@@ -212,6 +217,17 @@ export function assess(s: PatientState): Assessment {
   const missing: string[] = [];
   const notes: string[] = [];
   const chips: string[] = [];
+
+  if (s.age.trim() && (age === null || !Number.isInteger(age) || age < 18 || age > 120)) {
+    missing.push('本工具适用于成人，请填写 18~120 岁的整数年龄；儿童青少年需采用专门评估');
+  }
+  for (const [key, label] of [['ldlc', 'LDL-C'], ['tc', 'TC'], ['hdlc', 'HDL-C']] as const) {
+    const value = parseNum(s.lipids[key]);
+    if (s.lipids[key].trim() && (value === null || value <= 0)) missing.push(`${label} 必须为有效的正数`);
+  }
+  if (tc !== null && hdlc !== null && tc <= hdlc) missing.push('TC 必须大于 HDL-C，请核对化验结果');
+  if (tc !== null && ldlc !== null && ldlc > tc) missing.push('LDL-C 不应大于 TC，请核对化验结果');
+  if (s.fh && age === null) missing.push('请填写年龄，以确认成人 FH 目标的适用范围');
 
   let category: RiskCategory | null = null;
   let diabetesNote: string | null = null;
@@ -230,7 +246,7 @@ export function assess(s: PatientState): Assessment {
     } else if (s.diabetesType === 't1' && s.t1Duration20) {
       diabetesHighRisk = true;
       diabetesNote = '1型糖尿病病程≥20年，可作为 ASCVD 高危。';
-    } else if (age !== null && age < 40) {
+    } else if (age !== null && age >= 20 && age < 40) {
       const dmRfCount = [
         s.hypertension,
         s.dmRiskFactors.dyslipidemia,
@@ -271,12 +287,13 @@ export function assess(s: PatientState): Assessment {
 
   // ---------------- 二级预防 ----------------
   if (s.ascvd) {
-    const severeCount = [
+    const severeTypes = [
       s.severe.recentACS,
       s.severe.priorMI,
       s.severe.ischemicStroke,
       s.severe.symptomaticPAD,
     ].filter(Boolean).length;
+    const severeCount = s.recurrentSevereEvents ? Math.max(2, severeTypes) : severeTypes;
 
     const highRiskCount = [
       s.highRisk.ldlUnder18ReEvent,
@@ -291,7 +308,7 @@ export function assess(s: PatientState): Assessment {
 
     if (severeCount >= 2) {
       category = 'ultraHigh';
-      reasons.push(`已确诊 ASCVD，且发生过 ${severeCount} 次严重 ASCVD 事件（≥2次）→ 超高危`);
+      reasons.push('已确诊 ASCVD，病史确认发生过至少 2 次独立的严重 ASCVD 事件 → 超高危');
     } else if (severeCount === 1 && highRiskCount >= 2) {
       category = 'ultraHigh';
       reasons.push(`已确诊 ASCVD，发生过 1 次严重 ASCVD 事件，且合并 ${highRiskCount} 个高危险因素（≥2个）→ 超高危`);
@@ -322,7 +339,9 @@ export function assess(s: PatientState): Assessment {
     } else {
       const col = cholesterolColumn(ldlc, tc);
       if (col === null) {
-        missing.push('请填写基线 LDL-C 或 TC，以评估10年 ASCVD 发病风险');
+        missing.push(ldlc !== null || tc !== null
+          ? '基线血脂低于图1的分层范围（LDL-C≥1.8 或 TC≥3.1），需临床评估，不自动外推分层'
+          : '请填写基线 LDL-C 或 TC，以评估10年 ASCVD 发病风险');
       } else {
         if (age === null || s.sex === '') {
           missing.push('请填写年龄与性别，以准确统计危险因素个数');
@@ -344,7 +363,7 @@ export function assess(s: PatientState): Assessment {
           const tcCol = cholesterolColumn(null, tc);
           if (ldlCol !== null && tcCol !== null && ldlCol !== tcCol) {
             notes.push(
-              `注意：以 LDL-C 分层为第 ${ldlCol + 1} 层，以 TC 分层为第 ${tcCol + 1} 层，两者不一致（可能与低 HDL-C 或高 TG 有关）。本工具按指南正文以 LDL-C 为准；此类情况下非 HDL-C 更能反映 ASCVD 残余风险，建议结合风险增强因素（表2）与临床情况综合判断。`,
+              `注意：以 LDL-C 分层为第 ${ldlCol + 1} 层，以 TC 分层为第 ${tcCol + 1} 层，两者不一致。本工具按指南正文以 LDL-C 为准；建议核对基线化验结果，并结合风险增强因素（表2）与临床情况综合判断。`,
             );
           }
         }
@@ -353,7 +372,7 @@ export function assess(s: PatientState): Assessment {
         if (risk === 'moderate' && age !== null && age < 55) {
           const lifeFactors = [
             s.lifetime.bpHigh ? '收缩压≥160 mmHg或舒张压≥100 mmHg' : null,
-            nonHdlCalc !== null && nonHdlCalc >= 5.2 ? `非 HDL-C ${fmt(nonHdlCalc)} mmol/L（≥5.2）` : s.lifetime.nonHdlHigh ? '非 HDL-C≥5.2 mmol/L' : null,
+            nonHdlCalc !== null ? (nonHdlCalc >= 5.2 ? `非 HDL-C ${fmt(nonHdlCalc)} mmol/L（≥5.2）` : null) : s.lifetime.nonHdlHigh ? '非 HDL-C≥5.2 mmol/L' : null,
             lowHDL ? 'HDL-C<1.0 mmol/L' : null,
             s.lifetime.bmi28 ? 'BMI≥28 kg/m²' : null,
             s.smoking ? '吸烟' : null,
@@ -392,13 +411,13 @@ export function assess(s: PatientState): Assessment {
   if (diabetesWithAscvd) {
     target = {
       ldl: 1.4,
-      reduction50: false,
-      source: '表15：糖尿病合并 ASCVD 患者',
+      reduction50: true,
+      source: '表15：糖尿病合并 ASCVD；表7：超（极）高危降幅',
       recClass: 'I',
       evidence: 'A',
-      display: 'LDL-C <1.4 mmol/L（糖尿病合并 ASCVD）',
+      display: 'LDL-C <1.4 mmol/L 且较基线降低幅度 >50%（糖尿病合并 ASCVD）',
     };
-    notes.push('糖尿病合并 ASCVD 患者按超高危管理强度治疗；如基线 LDL-C 较高，降幅 >50% 亦为合理目标。');
+    notes.push('糖尿病合并 ASCVD 按表15取绝对目标，同时保留表7超（极）高危的降幅要求；不因特殊人群目标而取消降幅。');
   } else if (s.diabetes && (category === 'high' || diabetesHighRisk)) {
     target = {
       ldl: 1.8,
@@ -470,19 +489,19 @@ export function assess(s: PatientState): Assessment {
       ldl: fhTarget.ldl,
       reduction50: false,
       source: `表20：${fhTarget.label}`,
-      recClass: fhTarget.ldl <= 1.4 ? 'I' : 'IIa',
-      evidence: '—',
+      recClass: 'IIa',
+      evidence: 'B',
       display: `LDL-C <${fhTarget.ldl} mmol/L（${fhTarget.label}）`,
     };
   } else if (fhTarget && target && target.ldl !== null && fhTarget.ldl < target.ldl) {
     notes.push(`FH 特殊目标（${fhTarget.label}：<${fhTarget.ldl} mmol/L）比风险分层目标更严格，建议按 FH 目标执行。`);
     target = {
       ldl: fhTarget.ldl,
-      reduction50: target.reduction50 || fhTarget.ldl <= 1.4,
+      reduction50: target.reduction50,
       source: `${target.source}；表20：${fhTarget.label}`,
-      recClass: fhTarget.ldl <= 1.4 ? 'I' : 'IIa',
-      evidence: 'A',
-      display: `LDL-C <${fhTarget.ldl} mmol/L（${fhTarget.label}）`,
+      recClass: 'IIa',
+      evidence: 'B',
+      display: `LDL-C <${fhTarget.ldl} mmol/L${target.reduction50 ? ' 且较基线降低幅度 >50%' : ''}（${fhTarget.label}）`,
     };
   }
 
@@ -526,15 +545,15 @@ export function assess(s: PatientState): Assessment {
   ];
 
   return {
-    category,
-    categoryLabel: category ? RISK_LABEL[category] : '—',
-    chips,
-    target,
-    nonHdl,
+    category: missing.length ? null : category,
+    categoryLabel: missing.length ? '待评估' : category ? RISK_LABEL[category] : '—',
+    chips: [...new Set(chips)],
+    target: missing.length ? null : target,
+    nonHdl: missing.length ? null : nonHdl,
     calcNonHdl: nonHdlCalc,
-    reasons,
+    reasons: missing.length ? [] : reasons,
     missing,
-    advice,
+    advice: missing.length ? [] : advice,
     monitoring,
     notes,
     diabetesNote,
